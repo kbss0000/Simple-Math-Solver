@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+venv311/
+ENV/
+env/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model files and data (KEEP THESE - needed for deployment)
+# model.h5 - KEEP (needed for Streamlit)
+# label_encoder.pkl - KEEP (needed for Streamlit)
+
+# Large data files (exclude if too large)
+# data/ - Comment out if you want to include dataset
+
+# Logs
+*.log
+streamlit.log
+training_log.txt
+
+# Backup files
+*.backup
+*~
+
+# Test images (optional - can include or exclude)
+# test_*.png
+
