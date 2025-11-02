@@ -237,31 +237,22 @@ if uploaded_file is not None:
     if st.button("🔮 Solve Equation", type="primary", use_container_width=True):
         with st.spinner("Processing equation..."):
             try:
-                # Load model only when needed (lazy loading)
-                if model is None or label_encoder is None:
-                    with st.spinner("Loading model (first time only)..."):
-                        try:
-                            model, label_encoder, model_error = load_model_and_encoder()
-                            if model_error or model is None:
-                                st.error(f"⚠️ {model_error}")
-                                st.info(
-                                    "Please check the terminal for detailed error messages"
-                                )
-                                st.stop()
-                        except Exception as e:
-                            st.error(f"⚠️ Error loading model: {str(e)}")
-                            st.info("""
-                            **Possible causes:**
-                            - TensorFlow threading issue
-                            - Model file corrupted
-                            - Missing dependencies
-
-                            **Try:**
-                            1. Check terminal for error details
-                            2. Restart Streamlit
-                            3. Verify model files exist: `ls -lh model.h5 label_encoder.pkl`
-                            """)
-                            st.stop()
+                # Model loading is done in subprocess - just check if files exist
+                model_path = Path("model.h5")
+                if not model_path.exists():
+                    st.error("⚠️ Model file (model.h5) not found")
+                    st.info("Please train the model first or ensure model.h5 exists")
+                    st.stop()
+                
+                # Initialize dummy model/encoder for API compatibility
+                # They're not actually used - subprocess handles everything
+                if model is None:
+                    model = "dummy"  # Placeholder
+                if label_encoder is None:
+                    from sklearn.preprocessing import LabelEncoder
+                    classes = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "add", "div", "mul", "sub"]
+                    label_encoder = LabelEncoder()
+                    label_encoder.fit(classes)
 
                 # Convert PIL to OpenCV format
                 if len(img_array.shape) == 3:
@@ -269,11 +260,7 @@ if uploaded_file is not None:
                 else:
                     img_cv = img_array.copy()
 
-                # Recognize and solve
-                if model is None or label_encoder is None:
-                    st.error("Model not loaded. Please try again.")
-                    st.stop()
-
+                # recognize_equation uses subprocess - never loads TensorFlow in main process
                 result, error = recognize_equation(model, label_encoder, img_cv)
 
                 if error:

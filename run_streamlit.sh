@@ -29,5 +29,5 @@ echo ""
 echo "Keep this terminal open while using the app!"
 echo ""
 
-# Run Streamlit
-streamlit run streamlit_app.py
+# Run Streamlit with XSRF protection disabled for local development
+streamlit run streamlit_app.py --server.enableXsrfProtection false
