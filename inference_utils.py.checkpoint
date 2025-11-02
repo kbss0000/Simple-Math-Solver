@@ -128,51 +128,6 @@ def map_label_to_symbol(label, label_classes=None):
     base_symbol = label_map.get(int(label), '?')
     return symbol_map.get(base_symbol, base_symbol)
 
-def correct_add_sub_by_geometry(symbol, box):
-    """
-    Use bounding box geometry to correct ambiguous '+' vs '-' predictions.
-    
-    Logic:
-    - '-' (subtraction) is typically wider than tall (horizontal line)
-    - '+' (addition) is more square or slightly taller (vertical + horizontal)
-    
-    Args:
-        symbol: Current predicted symbol ('+' or '-')
-        box: Bounding box tuple (x, y, w, h)
-    
-    Returns:
-        Corrected symbol ('+' or '-')
-    """
-    if symbol not in ['+', '-']:
-        return symbol  # Only correct + and -
-    
-    if len(box) < 4:
-        return symbol  # Invalid box format
-    
-    x, y, w, h = box
-    
-    # Avoid division by zero
-    if h == 0:
-        return symbol
-    
-    # Calculate aspect ratio (width to height)
-    aspect_ratio = w / h
-    
-    # Thresholds determined empirically:
-    # - If width is much greater than height (aspect_ratio > 1.5), it's likely '-'
-    # - If closer to square (aspect_ratio < 1.2), it's likely '+'
-    # - In between (1.2 to 1.5) is ambiguous, keep prediction
-    
-    if aspect_ratio > 1.5:
-        # Clearly horizontal - prefer '-'
-        return '-'
-    elif aspect_ratio < 1.2:
-        # More square/vertical - prefer '+'
-        return '+'
-    else:
-        # Ambiguous zone - keep original prediction
-        return symbol
-
 def solve_equation(equation_str):
     """
     Solve a recognized equation string
@@ -329,24 +284,14 @@ def recognize_equation(model, label_encoder, image):
         # Convert to symbols
         symbol_map = {'add': '+', 'sub': '-', 'mul': '×', 'div': '÷'}
         symbols = []
-        for i, s in enumerate(symbol_names):
+        for s in symbol_names:
             symbol = symbol_map.get(str(s), str(s))
-            # Apply geometric correction for + and - symbols
-            if i < len(boxes):
-                symbol = correct_add_sub_by_geometry(symbol, boxes[i])
             symbols.append(symbol)
         equation_str = ''.join(symbols)
     else:
         # Manual mapping if label_encoder is dict
         label_classes = getattr(label_encoder, 'classes_', None)
-        symbols = [map_label_to_symbol(label, label_classes) for label in predicted_labels]
-        # Apply geometric correction for + and - symbols
-        corrected_symbols = []
-        for i, symbol in enumerate(symbols):
-            if i < len(boxes):
-                symbol = correct_add_sub_by_geometry(symbol, boxes[i])
-            corrected_symbols.append(symbol)
-        equation_str = ''.join(corrected_symbols)
+        equation_str = ''.join([map_label_to_symbol(label, label_classes) for label in predicted_labels])
     
     # Solve equation
     result, error = solve_equation(equation_str)
