@@ -1,11 +1,10 @@
-streamlit>=1.28.0
+# For training the model locally
+tensorflow>=2.15.0,<2.16.0
 opencv-python-headless>=4.8.0
 numpy>=1.25.2,<2.0.0
-tensorflow>=2.15.0,<2.16.0
 scikit-learn>=1.3.0
 imutils>=0.5.4
 Pillow>=10.0.0
 joblib>=1.3.0
 pandas>=2.0.0
 matplotlib>=3.7.0
-
