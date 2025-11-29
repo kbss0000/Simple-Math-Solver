@@ -1,0 +1,366 @@
+"""
+Utility functions for handwritten equation recognition and solving
+"""
+# Import TensorFlow configuration FIRST
+try:
+    import tf_config
+except ImportError:
+    # Fallback: set env vars manually
+    import os
+    os.environ['TF_NUM_INTEROP_THREADS'] = '1'
+    os.environ['TF_NUM_INTRAOP_THREADS'] = '1'
+    os.environ['OMP_NUM_THREADS'] = '1'
+    os.environ['MKL_NUM_THREADS'] = '1'
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import cv2
+import numpy as np
+import imutils
+from imutils.contours import sort_contours
+import re
+import sys
+
+# Configure TensorFlow at module import time (before any TF operations)
+_configured_tf = False
+def _configure_tensorflow():
+    """Configure TensorFlow for single-threaded execution - call this once"""
+    global _configured_tf
+    if _configured_tf:
+        return
+    try:
+        import tensorflow as tf
+        # CRITICAL: Must configure before any TensorFlow operations
+        tf.config.threading.set_inter_op_parallelism_threads(1)
+        tf.config.threading.set_intra_op_parallelism_threads(1)
+        # Disable optimizations
+        try:
+            tf.config.optimizer.set_experimental_options({'disable_meta_optimizer': True})
+        except:
+            pass
+        _configured_tf = True
+    except:
+        pass
+
+# Configure immediately
+_configure_tensorflow()
+
+def preprocess_symbol(image):
+    """Preprocess a single symbol image for model input"""
+    if len(image.shape) == 3:
+        img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        img_gray = image.copy()
+    
+    # Threshold
+    threshold_img = cv2.threshold(img_gray, 0, 255, cv2.THRESH_BINARY_INV|cv2.THRESH_OTSU)[1]
+    
+    # Resize to 32x32
+    threshold_img = cv2.resize(threshold_img, (32, 32))
+    
+    # Normalize
+    threshold_img = threshold_img / 255.0
+    
+    # Add channel dimension
+    threshold_img = np.expand_dims(threshold_img, axis=-1)
+    
+    return threshold_img
+
+def segment_equation(image):
+    """
+    Segment an equation image into individual symbols
+    Returns: list of symbol bounding boxes (x, y, w, h) and processed images
+    """
+    # Convert to grayscale
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+    
+    # Apply threshold
+    binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
+    
+    # Find contours
+    cnts = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = imutils.grab_contours(cnts)
+    
+    # Sort contours left to right
+    if cnts:
+        cnts = sort_contours(cnts, method="left-to-right")[0]
+    
+    # Extract bounding boxes and images
+    symbols = []
+    boxes = []
+    
+    for c in cnts:
+        # Get bounding box
+        (x, y, w, h) = cv2.boundingRect(c)
+        
+        # Filter out small noise
+        if w < 10 or h < 10:
+            continue
+        
+        # Extract symbol region with padding
+        padding = 5
+        y_start = max(0, y - padding)
+        y_end = min(image.shape[0], y + h + padding)
+        x_start = max(0, x - padding)
+        x_end = min(image.shape[1], x + w + padding)
+        
+        symbol_img = gray[y_start:y_end, x_start:x_end]
+        
+        boxes.append((x, y, w, h))
+        symbols.append(symbol_img)
+    
+    return boxes, symbols
+
+def map_label_to_symbol(label, label_classes=None):
+    """Map numeric label back to symbol"""
+    # If label_classes provided (from LabelEncoder), use them
+    if label_classes is not None:
+        return str(label_classes[int(label)]) if int(label) < len(label_classes) else '?'
+    
+    # Default mapping (will be overridden by label_encoder)
+    label_map = {
+        0: '0', 1: '1', 2: '2', 3: '3', 4: '4',
+        5: '5', 6: '6', 7: '7', 8: '8', 9: '9',
+        10: 'add', 11: 'sub', 12: 'mul', 13: 'div'
+    }
+    symbol_map = {'add': '+', 'sub': '-', 'mul': '×', 'div': '÷'}
+    base_symbol = label_map.get(int(label), '?')
+    return symbol_map.get(base_symbol, base_symbol)
+
+def correct_add_sub_by_geometry(symbol, box):
+    """
+    Use bounding box geometry to correct ambiguous '+' vs '-' predictions.
+    
+    Logic:
+    - '-' (subtraction) is typically wider than tall (horizontal line)
+    - '+' (addition) is more square or slightly taller (vertical + horizontal)
+    
+    Args:
+        symbol: Current predicted symbol ('+' or '-')
+        box: Bounding box tuple (x, y, w, h)
+    
+    Returns:
+        Corrected symbol ('+' or '-')
+    """
+    if symbol not in ['+', '-']:
+        return symbol  # Only correct + and -
+    
+    if len(box) < 4:
+        return symbol  # Invalid box format
+    
+    x, y, w, h = box
+    
+    # Avoid division by zero
+    if h == 0:
+        return symbol
+    
+    # Calculate aspect ratio (width to height)
+    aspect_ratio = w / h
+    
+    # Thresholds determined empirically:
+    # - If width is much greater than height (aspect_ratio > 1.5), it's likely '-'
+    # - If closer to square (aspect_ratio < 1.2), it's likely '+'
+    # - In between (1.2 to 1.5) is ambiguous, keep prediction
+    
+    if aspect_ratio > 1.5:
+        # Clearly horizontal - prefer '-'
+        return '-'
+    elif aspect_ratio < 1.2:
+        # More square/vertical - prefer '+'
+        return '+'
+    else:
+        # Ambiguous zone - keep original prediction
+        return symbol
+
+def solve_equation(equation_str):
+    """
+    Solve a recognized equation string
+    Example: "2 + 3" -> "5"
+    """
+    try:
+        # Replace symbols for Python evaluation
+        equation_str = equation_str.replace('×', '*')
+        equation_str = equation_str.replace('÷', '/')
+        equation_str = equation_str.replace(' ', '')
+        
+        # Remove equals sign and question marks
+        equation_str = equation_str.split('=')[0]
+        equation_str = equation_str.replace('?', '')
+        
+        # Validate: only numbers and operators
+        if not re.match(r'^[\d\+\-\*/\(\)\.\s]+$', equation_str):
+            return None, "Invalid equation format"
+        
+        # Evaluate safely
+        result = eval(equation_str)
+        return result, None
+    except Exception as e:
+        return None, str(e)
+
+def recognize_equation(model, label_encoder, image):
+    """
+    Full pipeline: segment -> recognize -> solve
+    NOTE: model and label_encoder are ignored - everything runs in subprocess
+    to avoid TensorFlow crashes in the main Streamlit process
+    """
+    # Segment equation into symbols
+    boxes, symbol_images = segment_equation(image)
+    
+    if not symbol_images:
+        return None, "No symbols detected in image"
+    
+    # Preprocess each symbol
+    processed_symbols = []
+    for symbol_img in symbol_images:
+        processed = preprocess_symbol(symbol_img)
+        processed_symbols.append(processed)
+    
+    # ALWAYS use subprocess - model is loaded in subprocess, never in main process
+    import subprocess
+    import json
+    import tempfile
+    import os
+    from pathlib import Path
+    
+    X = np.array(processed_symbols)
+    
+    # Save data to temp file
+    temp_dir = tempfile.mkdtemp()
+    data_file = os.path.join(temp_dir, 'data.npy')
+    
+    try:
+        np.save(data_file, X)
+        
+        # Get model path
+        model_path = Path("model.h5").resolve()
+        if not model_path.exists():
+            return None, "Model file not found"
+        
+        # Run prediction in subprocess using the worker script
+        worker_script = Path(__file__).parent.resolve() / "predict_worker.py"
+        
+        if not worker_script.exists():
+            return None, f"Worker script not found: {worker_script}"
+        
+        # Use the same Python interpreter as the current process (ensures packages are available)
+        # This works on Streamlit Cloud and local environments
+        python_exe = sys.executable
+        # Fallback to venv if sys.executable is somehow unavailable
+        if not python_exe or not Path(python_exe).exists():
+            python_exe = Path(__file__).parent.resolve() / "venv311" / "bin" / "python"
+            if not python_exe.exists():
+                python_exe = Path(__file__).parent.resolve() / "venv" / "bin" / "python"
+                if not python_exe.exists():
+                    python_exe = "python3"  # Final fallback
+        
+        cmd = [
+            str(python_exe), str(worker_script),
+            str(model_path),
+            str(data_file)
+        ]
+        
+        # Set environment variables for subprocess
+        env = os.environ.copy()
+        env['TF_NUM_INTEROP_THREADS'] = '1'
+        env['TF_NUM_INTRAOP_THREADS'] = '1'
+        env['TF_CPP_MIN_LOG_LEVEL'] = '3'
+        env['OMP_NUM_THREADS'] = '1'
+        env['MKL_NUM_THREADS'] = '1'
+        env['PYTHONUNBUFFERED'] = '1'
+        
+        # Run with timeout
+        try:
+            result = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(Path(__file__).parent.resolve())
+            )
+            
+            if result.returncode != 0:
+                error_msg = f"Subprocess failed (code {result.returncode}): {result.stderr[:500]}"
+                if result.stdout:
+                    error_msg += f"\nOutput: {result.stdout[:500]}"
+                return None, error_msg
+            
+            # Parse result
+            output = result.stdout.strip()
+            if not output:
+                return None, "Empty output from prediction worker"
+            
+            predicted_labels = json.loads(output)
+            if isinstance(predicted_labels, dict) and 'error' in predicted_labels:
+                return None, f"Worker error: {predicted_labels['error']}"
+            
+            predicted_labels = np.array(predicted_labels)
+            
+        except subprocess.TimeoutExpired:
+            return None, "Prediction timed out after 30 seconds"
+        except json.JSONDecodeError as e:
+            return None, f"Failed to parse JSON: {e}\nOutput was: {result.stdout[:200]}"
+        except Exception as e:
+            return None, f"Subprocess execution error: {str(e)}"
+        finally:
+            # Always clean up temp file
+            try:
+                if os.path.exists(data_file):
+                    os.remove(data_file)
+                if os.path.exists(temp_dir):
+                    os.rmdir(temp_dir)
+            except:
+                pass
+                
+    except Exception as e:
+        import traceback
+        # Clean up on error
+        try:
+            if os.path.exists(data_file):
+                os.remove(data_file)
+            if os.path.exists(temp_dir):
+                os.rmdir(temp_dir)
+        except:
+            pass
+        error_msg = f"Prediction setup error: {str(e)}\n{traceback.format_exc()}"
+        return None, error_msg
+    
+    # Decode labels to symbols
+    if hasattr(label_encoder, 'inverse_transform'):
+        # If using sklearn LabelEncoder
+        symbol_names = label_encoder.inverse_transform(predicted_labels)
+        # Convert to symbols
+        symbol_map = {'add': '+', 'sub': '-', 'mul': '×', 'div': '÷'}
+        symbols = []
+        for i, s in enumerate(symbol_names):
+            symbol = symbol_map.get(str(s), str(s))
+            # Apply geometric correction for + and - symbols
+            if i < len(boxes):
+                symbol = correct_add_sub_by_geometry(symbol, boxes[i])
+            symbols.append(symbol)
+        equation_str = ''.join(symbols)
+    else:
+        # Manual mapping if label_encoder is dict
+        label_classes = getattr(label_encoder, 'classes_', None)
+        symbols = [map_label_to_symbol(label, label_classes) for label in predicted_labels]
+        # Apply geometric correction for + and - symbols
+        corrected_symbols = []
+        for i, symbol in enumerate(symbols):
+            if i < len(boxes):
+                symbol = correct_add_sub_by_geometry(symbol, boxes[i])
+            corrected_symbols.append(symbol)
+        equation_str = ''.join(corrected_symbols)
+    
+    # Solve equation
+    result, error = solve_equation(equation_str)
+    
+    return {
+        'equation': equation_str,
+        'result': result,
+        'error': error,
+        'symbols': len(symbol_images),
+        'boxes': boxes
+    }, None
+
