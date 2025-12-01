@@ -4,7 +4,7 @@ A full-stack application that recognizes and solves handwritten mathematical equ
 
 ## Live Demo
 
-- **Frontend**: [https://frontend-kbssrikar7s-projects.vercel.app](https://frontend-kbssrikar7s-projects.vercel.app)
+- **Frontend**: [https://simple-math-solver.vercel.app/](https://simple-math-solver.vercel.app/)
 - **Backend API**: [https://huggingface.co/spaces/kbsss/equation-solver](https://huggingface.co/spaces/kbsss/equation-solver)
 
 ## Screenshots
